@@ -329,6 +329,13 @@ pub trait WindowOps {
 
     fn maximize(&self) {}
     fn restore(&self) {}
+    fn toggle_maximize(&self, currently_maximized: bool) {
+        if currently_maximized {
+            self.restore();
+        } else {
+            self.maximize();
+        }
+    }
     fn focus(&self) {}
 
     fn toggle_fullscreen(&self) {}

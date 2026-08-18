@@ -12,9 +12,7 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_foundation::url::CFURL;
-use core_graphics::base::{
-    kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
-};
+use core_graphics::base::{kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat};
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
 use core_graphics::geometry::{CGAffineTransform, CGPoint};
@@ -73,19 +71,14 @@ fn clone_with_transform(font: &CTFont, size: f64, matrix: &CGAffineTransform) ->
     }
 }
 
-fn create_ct_font(
-    source: &FontDataSource,
-    index: u32,
-    variation: u32,
-) -> anyhow::Result<CTFont> {
+fn create_ct_font(source: &FontDataSource, index: u32, variation: u32) -> anyhow::Result<CTFont> {
     let ct_font = match source {
         FontDataSource::OnDisk(path) => {
             let url = CFURL::from_path(path, false)
                 .ok_or_else(|| anyhow!("Failed to create CFURL from path {:?}", path))?;
             let descriptors = unsafe {
-                let array_ref = CTFontManagerCreateFontDescriptorsFromURL(
-                    url.as_concrete_TypeRef().cast(),
-                );
+                let array_ref =
+                    CTFontManagerCreateFontDescriptorsFromURL(url.as_concrete_TypeRef().cast());
                 if array_ref.is_null() {
                     anyhow::bail!(
                         "CTFontManagerCreateFontDescriptorsFromURL returned null for {:?}",
@@ -118,9 +111,12 @@ fn create_ct_font(
 fn apply_named_instance(ct_font: &CTFont, variation: u32) -> anyhow::Result<CTFont> {
     let cg_font = ct_font.copy_to_CGFont();
     let fvar_tag = u32::from_be_bytes(*b"fvar");
-    let fvar_data = cg_font
-        .copy_table_for_tag(fvar_tag)
-        .ok_or_else(|| anyhow!("Font has no fvar table but variation {} requested", variation))?;
+    let fvar_data = cg_font.copy_table_for_tag(fvar_tag).ok_or_else(|| {
+        anyhow!(
+            "Font has no fvar table but variation {} requested",
+            variation
+        )
+    })?;
     let fvar = fvar_data.bytes();
 
     if fvar.len() < 16 {
@@ -132,9 +128,9 @@ fn apply_named_instance(ct_font: &CTFont, variation: u32) -> anyhow::Result<CTFo
     let instance_count = u16::from_be_bytes([fvar[12], fvar[13]]) as usize;
     let instance_size = u16::from_be_bytes([fvar[14], fvar[15]]) as usize;
 
-    let instance_idx = (variation as usize).checked_sub(1).ok_or_else(|| {
-        anyhow!("Invalid variation index {}", variation)
-    })?;
+    let instance_idx = (variation as usize)
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("Invalid variation index {}", variation))?;
     if instance_idx >= instance_count {
         anyhow::bail!(
             "Variation {} out of range (font has {} named instances)",
@@ -167,21 +163,19 @@ fn apply_named_instance(ct_font: &CTFont, variation: u32) -> anyhow::Result<CTFo
     let mut pairs: Vec<(CFString, CFNumber)> = Vec::with_capacity(axis_count);
     for (i, &tag) in axis_tags.iter().enumerate() {
         let off = coords_offset + i * 4;
-        let raw = i32::from_be_bytes([
-            fvar[off],
-            fvar[off + 1],
-            fvar[off + 2],
-            fvar[off + 3],
-        ]);
+        let raw = i32::from_be_bytes([fvar[off], fvar[off + 1], fvar[off + 2], fvar[off + 3]]);
         let value = raw as f64 / 65536.0; // Fixed 16.16 → f64
         let tag_bytes = tag.to_be_bytes();
-        let tag_str =
-            CFString::new(&String::from_utf8_lossy(&tag_bytes));
+        let tag_str = CFString::new(&String::from_utf8_lossy(&tag_bytes));
         pairs.push((tag_str, CFNumber::from(value)));
     }
 
     let variations = CFDictionary::from_CFType_pairs(&pairs);
-    Ok(font::new_from_CGFont_with_variations(&cg_font, 0.0, &variations))
+    Ok(font::new_from_CGFont_with_variations(
+        &cg_font,
+        0.0,
+        &variations,
+    ))
 }
 
 fn ct_font_from_bytes(data: &[u8], index: u32) -> anyhow::Result<CTFont> {
@@ -241,8 +235,7 @@ impl FontRasterizer for CoreTextRasterizer {
         let glyph: u16 = glyph_pos
             .try_into()
             .map_err(|_| anyhow!("Glyph index {} exceeds CGGlyph (u16) range", glyph_pos))?;
-        let bounds =
-            ct_font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
+        let bounds = ct_font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
 
         if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
             return Ok(RasterizedGlyph {
@@ -252,7 +245,10 @@ impl FontRasterizer for CoreTextRasterizer {
                 bearing_x: PixelLength::new(0.0),
                 bearing_y: PixelLength::new(0.0),
                 has_color: self.has_color,
-                is_scaled: false,
+                // CoreText rasterizes this outline font at the requested
+                // point size. Mark it as scaled so glyphcache does not treat
+                // it as a bitmap strike and apply a second height-based scale.
+                is_scaled: true,
             });
         }
 
@@ -274,7 +270,7 @@ impl FontRasterizer for CoreTextRasterizer {
                 bearing_x: PixelLength::new(0.0),
                 bearing_y: PixelLength::new(0.0),
                 has_color: self.has_color,
-                is_scaled: false,
+                is_scaled: true,
             });
         }
 
@@ -321,7 +317,7 @@ impl FontRasterizer for CoreTextRasterizer {
             bearing_x: PixelLength::new(bearing_x),
             bearing_y: PixelLength::new(bearing_y),
             has_color: self.has_color,
-            is_scaled: false,
+            is_scaled: true,
         })
     }
 }
@@ -345,7 +341,8 @@ mod tests {
     fn make_parsed_font(path: PathBuf) -> ParsedFont {
         let source = FontDataSource::OnDisk(path);
         let mut fonts = vec![];
-        crate::parser::parse_and_collect_font_info(&source, &mut fonts, FontOrigin::CoreText);
+        let _ =
+            crate::parser::parse_and_collect_font_info(&source, &mut fonts, FontOrigin::CoreText);
         fonts.into_iter().next().expect("No fonts parsed from file")
     }
 
@@ -370,6 +367,10 @@ mod tests {
         for glyph_idx in 1..70u32 {
             if let Ok(glyph) = rasterizer.rasterize_glyph(glyph_idx, 14.0, 144) {
                 if glyph.width > 0 && glyph.height > 0 && !glyph.data.is_empty() {
+                    assert!(
+                        glyph.is_scaled,
+                        "CoreText outline glyphs are already rasterized at the requested size"
+                    );
                     assert_eq!(
                         glyph.data.len(),
                         glyph.width * glyph.height * 4,
@@ -380,9 +381,11 @@ mod tests {
                 }
             }
         }
-        assert!(found_nonempty, "Should produce at least one non-empty glyph");
+        assert!(
+            found_nonempty,
+            "Should produce at least one non-empty glyph"
+        );
     }
-
 
     #[test]
     fn rasterizer_does_not_crash_on_zero_glyph() {
@@ -427,8 +430,7 @@ mod tests {
 
         for gid in 1..glyph_count.min(2000) {
             let glyph = gid as u16;
-            let bounds =
-                ct_font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
+            let bounds = ct_font.get_bounding_rects_for_glyphs(kCTFontOrientationDefault, &[glyph]);
 
             if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
                 continue;

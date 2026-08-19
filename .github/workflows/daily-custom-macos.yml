@@ -1,0 +1,152 @@
+name: Daily custom macOS build
+
+on:
+  schedule:
+    # 02:30 Asia/Shanghai (18:30 UTC)
+    - cron: "30 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-custom-macos-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build universal macOS app
+    runs-on: macos-latest
+    timeout-minutes: 180
+
+    env:
+      BUILD_REASON: Schedule
+      CARGO_INCREMENTAL: "0"
+      MACOSX_DEPLOYMENT_TARGET: "10.12"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Check out latest upstream main
+        uses: actions/checkout@v5
+        with:
+          repository: wezterm/wezterm
+          ref: main
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply CoreText and tab bar zoom branches
+        shell: bash
+        env:
+          FORK_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          upstream_sha=$(git rev-parse HEAD)
+          echo "UPSTREAM_SHA=${upstream_sha}" >> "${GITHUB_ENV}"
+
+          git remote add fork "https://github.com/${FORK_REPOSITORY}.git"
+          git fetch --no-tags fork \
+            "+refs/heads/main:refs/remotes/fork/main" \
+            "+refs/heads/agent/macos-coretext-rasterizer:refs/remotes/fork/agent/macos-coretext-rasterizer" \
+            "+refs/heads/agent/macos-tab-bar-double-click-zoom:refs/remotes/fork/agent/macos-tab-bar-double-click-zoom"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          apply_branch() {
+            local branch="$1"
+            local base
+            local commits
+
+            base=$(git merge-base fork/main "fork/${branch}")
+            commits=$(git rev-list --reverse "${base}..fork/${branch}")
+
+            if [[ -z "${commits}" ]]; then
+              echo "No commits found for ${branch}" >&2
+              return 1
+            fi
+
+            echo "Applying ${branch} from base ${base}"
+            while IFS= read -r commit; do
+              git cherry-pick "${commit}"
+            done <<< "${commits}"
+          }
+
+          apply_branch agent/macos-coretext-rasterizer
+          apply_branch agent/macos-tab-bar-double-click-zoom
+
+          git diff --check "${upstream_sha}..HEAD"
+          git log --oneline --decorate -8
+
+      - name: Install Rust targets
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache vendored Rust dependencies
+        uses: actions/cache@v4
+        id: cargo-vendor-cache
+        with:
+          path: |
+            vendor
+            .cargo/config
+          key: cargo-deps-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Vendor Rust dependencies
+        if: steps.cargo-vendor-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo vendor --locked --versioned-dirs >> .cargo/config
+
+      - name: Install system dependencies
+        shell: bash
+        run: env CI=yes PATH="$PATH" ./get-deps
+
+      - name: Build Intel binaries
+        shell: bash
+        run: |
+          cargo build --locked --release --target x86_64-apple-darwin \
+            -p wezterm \
+            -p wezterm-gui \
+            -p wezterm-mux-server \
+            -p strip-ansi-escapes
+
+      - name: Build Apple Silicon binaries
+        shell: bash
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin \
+            -p wezterm \
+            -p wezterm-gui \
+            -p wezterm-mux-server \
+            -p strip-ansi-escapes
+
+      - name: Package WezTerm.app
+        shell: bash
+        run: bash ci/deploy.sh
+
+      - name: Upload downloadable app artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: WezTerm-macOS-custom-${{ github.run_number }}
+          path: WezTerm-macos-nightly.zip
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Write build summary
+        shell: bash
+        run: |
+          {
+            echo "## Custom WezTerm macOS build"
+            echo
+            echo "- Upstream commit: \`${UPSTREAM_SHA}\`"
+            echo "- CoreText branch: \`agent/macos-coretext-rasterizer\`"
+            echo "- Zoom branch: \`agent/macos-tab-bar-double-click-zoom\`"
+            echo "- Artifact: \`WezTerm-macOS-custom-${GITHUB_RUN_NUMBER}\`"
+            echo "- Package: \`WezTerm-macos-nightly.zip\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

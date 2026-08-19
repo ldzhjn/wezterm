@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build universal macOS app
+    name: Build ARM64 macOS app
     runs-on: macos-latest
     timeout-minutes: 180
 
@@ -80,11 +80,9 @@ jobs:
           git diff --check "${upstream_sha}..HEAD"
           git log --oneline --decorate -8
 
-      - name: Install Rust targets
+      - name: Install Rust target
         shell: bash
-        run: |
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
+        run: rustup target add aarch64-apple-darwin
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -107,15 +105,6 @@ jobs:
         shell: bash
         run: env CI=yes PATH="$PATH" ./get-deps
 
-      - name: Build Intel binaries
-        shell: bash
-        run: |
-          cargo build --locked --release --target x86_64-apple-darwin \
-            -p wezterm \
-            -p wezterm-gui \
-            -p wezterm-mux-server \
-            -p strip-ansi-escapes
-
       - name: Build Apple Silicon binaries
         shell: bash
         run: |
@@ -125,14 +114,25 @@ jobs:
             -p wezterm-mux-server \
             -p strip-ansi-escapes
 
+      - name: Verify ARM64 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in wezterm wezterm-gui wezterm-mux-server strip-ansi-escapes; do
+            path="target/aarch64-apple-darwin/release/${bin}"
+            archs=$(lipo -archs "${path}")
+            echo "${bin}: ${archs}"
+            [[ "${archs}" == "arm64" ]]
+          done
+
       - name: Package WezTerm.app
         shell: bash
-        run: bash ci/deploy.sh
+        run: bash ci/deploy.sh target/aarch64-apple-darwin
 
       - name: Upload downloadable app artifact
         uses: actions/upload-artifact@v7
         with:
-          name: WezTerm-macOS-custom-${{ github.run_number }}
+          name: WezTerm-macOS-arm64-custom-${{ github.run_number }}
           path: WezTerm-macos-nightly.zip
           if-no-files-found: error
           retention-days: 30
@@ -147,6 +147,7 @@ jobs:
             echo "- Upstream commit: \`${UPSTREAM_SHA}\`"
             echo "- CoreText branch: \`agent/macos-coretext-rasterizer\`"
             echo "- Zoom branch: \`agent/macos-tab-bar-double-click-zoom\`"
-            echo "- Artifact: \`WezTerm-macOS-custom-${GITHUB_RUN_NUMBER}\`"
+            echo "- Architecture: \`arm64\` (Apple Silicon)"
+            echo "- Artifact: \`WezTerm-macOS-arm64-custom-${GITHUB_RUN_NUMBER}\`"
             echo "- Package: \`WezTerm-macos-nightly.zip\`"
           } >> "${GITHUB_STEP_SUMMARY}"

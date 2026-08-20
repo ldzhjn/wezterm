@@ -374,6 +374,10 @@ pub(crate) struct WindowInner {
     view: StrongPtr,
     window: StrongPtr,
     config: ConfigHandle,
+    /// The user-sized frame saved by tab-bar zoom. AppKit's `isZoomed`
+    /// can report a false positive after moving a window between screens,
+    /// so the custom tab bar must not rely on it for this toggle.
+    tab_bar_zoomed_from: Option<NSRect>,
 }
 
 fn function_key_to_keycode(function_key: char) -> KeyCode {
@@ -634,6 +638,7 @@ impl Window {
                 window,
                 view,
                 config: config.clone(),
+                tab_bar_zoomed_from: None,
             }));
             inner.borrow_mut().window.replace(weak_window);
             conn.windows
@@ -848,6 +853,13 @@ impl WindowOps for Window {
     fn restore(&self) {
         Connection::with_window_inner(self.id, move |inner| {
             inner.restore();
+            Ok(())
+        });
+    }
+
+    fn toggle_maximize(&self, currently_maximized: bool) {
+        Connection::with_window_inner(self.id, move |inner| {
+            inner.toggle_tab_bar_zoom(currently_maximized);
             Ok(())
         });
     }
@@ -1302,6 +1314,47 @@ impl WindowInner {
             unsafe {
                 NSWindow::zoom_(*self.window, nil);
             }
+        }
+    }
+
+    fn toggle_tab_bar_zoom(&mut self, currently_maximized: bool) {
+        unsafe {
+            let screen: id = msg_send![*self.window, screen];
+            if screen == nil {
+                if currently_maximized {
+                    self.restore();
+                } else {
+                    self.maximize();
+                }
+                return;
+            }
+
+            let current_frame = NSWindow::frame(*self.window);
+            let visible_frame = NSScreen::visibleFrame(screen);
+
+            // AppKit may describe a corner-tiled window as zoomed. Compare
+            // actual geometry instead: only a window that already fills the
+            // current screen's usable area should be restored.
+            let nearly_equal = |a: f64, b: f64| (a - b).abs() <= 1.0;
+            let fills_visible_frame = nearly_equal(current_frame.origin.x, visible_frame.origin.x)
+                && nearly_equal(current_frame.origin.y, visible_frame.origin.y)
+                && nearly_equal(current_frame.size.width, visible_frame.size.width)
+                && nearly_equal(current_frame.size.height, visible_frame.size.height);
+
+            if fills_visible_frame {
+                if let Some(saved_frame) = self.tab_bar_zoomed_from.take() {
+                    self.window.setFrame_display_animate_(saved_frame, YES, YES);
+                } else {
+                    self.restore();
+                }
+                return;
+            }
+
+            // Replace a stale saved frame if the user moved, resized or tiled
+            // the window between toggles.
+            self.tab_bar_zoomed_from = Some(current_frame);
+            self.window
+                .setFrame_display_animate_(visible_frame, YES, YES);
         }
     }
 

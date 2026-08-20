@@ -472,15 +472,18 @@ impl super::TermWindow {
                         .window_state
                         .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
                     if let Some(ref window) = self.window {
-                        if self.config.window_decorations
+                        // Treat the custom tab bar as a title bar in the
+                        // borderless, resizable configuration too.  This lets
+                        // macOS users double-click its empty area to zoom or
+                        // restore without showing integrated window buttons.
+                        let decorations = self.config.window_decorations;
+                        let tab_bar_can_zoom = decorations
                             == WindowDecorations::INTEGRATED_BUTTONS | WindowDecorations::RESIZE
-                        {
+                            || cfg!(target_os = "macos")
+                                && decorations == WindowDecorations::RESIZE;
+                        if tab_bar_can_zoom {
                             if self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2) {
-                                if maximized {
-                                    window.restore();
-                                } else {
-                                    window.maximize();
-                                }
+                                window.toggle_maximize(maximized);
                             }
                         }
                     }
@@ -499,11 +502,7 @@ impl super::TermWindow {
                                 let maximized = self
                                     .window_state
                                     .intersects(WindowState::MAXIMIZED | WindowState::FULL_SCREEN);
-                                if maximized {
-                                    window.restore();
-                                } else {
-                                    window.maximize();
-                                }
+                                window.toggle_maximize(maximized);
                             }
                             Button::Close => self.close_requested(&window.clone()),
                         }
